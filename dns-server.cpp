@@ -1,40 +1,41 @@
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/tcp.h>
-#include <openssl/ec.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <openssl/ssl.h>
-#include <openssl/x509.h>
-#include <openssl/x509_vfy.h>
-#include <openssl/x509v3.h>
-#include <signal.h>
-#include <sys/epoll.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <time.h>
-#include <unistd.h>
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <errno.h>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
+#include <netinet/tcp.h>
+#include <new>
+#include <openssl/ec.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/x509_vfy.h>
 #include <queue>
+#include <signal.h>
 #include <stdexcept>
 #include <string>
+#include <sys/epoll.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <thread>
+#include <time.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
-#include <arpa/inet.h>
 typedef short int intS;
 
 #ifndef DNS_HOST
@@ -129,7 +130,7 @@ static size_t online_cpu_count() {
 	if (n > 0) {
 		return static_cast<size_t>(n);
 	}
-	unsigned int hc = std::thread::hardware_concurrency();
+	intS hc = static_cast<intS>(std::thread::hardware_concurrency());
 	return hc == 0 ? 1 : static_cast<size_t>(hc);
 }
 
@@ -162,7 +163,7 @@ struct RuntimeConfig {
 	intS upstream_io_timeout_seconds;
 	std::string config_path;
 
-	static RuntimeConfig load(int argc, char** argv) {
+	static RuntimeConfig load(intS argc, char** argv) {
 		RuntimeConfig cfg;
 		const size_t cpus = online_cpu_count();
 		const uint64_t ram = physical_ram_bytes();
@@ -173,7 +174,7 @@ struct RuntimeConfig {
 		cfg.upstream_dns = UPSTREAM_DNS;
 
 		cfg.config_path = "/etc/dns_server/config";
-		for (int i = 1; i < argc; ++i) {
+		for (intS i = 1; i < argc; ++i) {
 			std::string arg = argv[i] == NULL ? std::string() : std::string(argv[i]);
 			if (arg == "-c" || arg == "--config") {
 				if (i + 1 >= argc || argv[i + 1] == NULL || argv[i + 1][0] == '\0') {
@@ -1040,7 +1041,7 @@ private:
 			}
 			uint64_t n = 0;
 			while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) {
-				n = n * 10 + static_cast<unsigned int>(s[i] - '0');
+				n = n * 10 + static_cast<intS>(s[i] - '0');
 				if (n > 0xffffffffULL) {
 					return false;
 				}
@@ -1813,6 +1814,156 @@ private:
 		return false;
 	}
 
+
+	static void split_dns_labels(const std::string& name, std::vector<std::string>& labels) {
+		labels.clear();
+		if (name.empty() || name == ".") {
+			return;
+		}
+		size_t pos = 0;
+		while (pos < name.size()) {
+			size_t dot = name.find('.', pos);
+			size_t len = (dot == std::string::npos) ? (name.size() - pos) : (dot - pos);
+			if (len > 0) {
+				labels.push_back(name.substr(pos, len));
+			}
+			if (dot == std::string::npos) {
+				break;
+			}
+			pos = dot + 1;
+		}
+	}
+
+	static bool has_star_wildcard_label(const std::vector<std::string>& labels) {
+		for (size_t i = 0; i < labels.size(); ++i) {
+			if (labels[i] == "*") {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool wildcard_labels_match_at(const std::vector<std::string>& pattern, size_t pattern_pos,
+								 const std::vector<std::string>& name, size_t name_pos) {
+		if (pattern_pos == pattern.size()) {
+			return name_pos == name.size();
+		}
+
+		const std::string& label = pattern[pattern_pos];
+		if (label == "n") {
+			if (name_pos >= name.size()) {
+				return false;
+			}
+			for (size_t next_name_pos = name_pos + 1; next_name_pos <= name.size(); ++next_name_pos) {
+				if (wildcard_labels_match_at(pattern, pattern_pos + 1, name, next_name_pos)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		if (name_pos >= name.size()) {
+			return false;
+		}
+		if (label == "*") {
+			return wildcard_labels_match_at(pattern, pattern_pos + 1, name, name_pos + 1);
+		}
+		if (label != name[name_pos]) {
+			return false;
+		}
+		return wildcard_labels_match_at(pattern, pattern_pos + 1, name, name_pos + 1);
+	}
+
+	static bool wildcard_owner_matches(const std::string& owner, const std::string& name) {
+		if (owner == name) {
+			return false;
+		}
+
+		std::vector<std::string> owner_labels;
+		split_dns_labels(owner, owner_labels);
+		if (!has_star_wildcard_label(owner_labels)) {
+			return false;
+		}
+
+		std::vector<std::string> name_labels;
+		split_dns_labels(name, name_labels);
+		return wildcard_labels_match_at(owner_labels, 0, name_labels, 0);
+	}
+
+	struct WildcardRecordList {
+		Record* records;
+		size_t count;
+		size_t capacity;
+
+		WildcardRecordList() : records(NULL), count(0), capacity(0) {}
+
+		~WildcardRecordList() {
+			clear();
+		}
+
+		void clear() {
+			for (size_t i = 0; i < count; ++i) {
+				records[i].~Record();
+			}
+			std::free(records);
+			records = NULL;
+			count = 0;
+			capacity = 0;
+		}
+
+		bool grow() {
+			size_t new_capacity = capacity == 0 ? 4 : capacity * 2;
+			if (capacity != 0 && new_capacity <= capacity) {
+				return false;
+			}
+			if (new_capacity > std::numeric_limits<size_t>::max() / sizeof(Record)) {
+				return false;
+			}
+
+			void* mem = std::malloc(sizeof(Record) * new_capacity);
+			if (mem == NULL) {
+				return false;
+			}
+			Record* new_records = static_cast<Record*>(mem);
+			size_t copied = 0;
+			try {
+				for (; copied < count; ++copied) {
+					new (&new_records[copied]) Record(records[copied]);
+				}
+			} catch (...) {
+				for (size_t i = 0; i < copied; ++i) {
+					new_records[i].~Record();
+				}
+				std::free(new_records);
+				throw;
+			}
+
+			for (size_t i = 0; i < count; ++i) {
+				records[i].~Record();
+			}
+			std::free(records);
+			records = new_records;
+			capacity = new_capacity;
+			return true;
+		}
+
+		Record* add_copy_with_owner(const Record& rec, const std::string& owner) {
+			if (count == capacity && !grow()) {
+				return NULL;
+			}
+			Record* slot = &records[count];
+			new (slot) Record(rec);
+			try {
+				slot->owner = owner;
+			} catch (...) {
+				slot->~Record();
+				throw;
+			}
+			++count;
+			return slot;
+		}
+	};
+
 	static bool parse_question(const uint8_t* req, size_t rlen, Question& q) {
 		if (req == NULL || rlen < 16) {
 			return false;
@@ -1962,8 +2113,38 @@ private:
 		}
 	}
 
+	bool matching_wildcard_records(const std::string& name, uint16_t qtype,
+								 WildcardRecordList& wildcard_records,
+								 std::vector<const Record*>& out) const {
+		for (std::unordered_map<std::string, std::vector<Record> >::const_iterator it = records_.begin(); it != records_.end(); ++it) {
+			if (!wildcard_owner_matches(it->first, name)) {
+				continue;
+			}
+			for (size_t i = 0; i < it->second.size(); ++i) {
+				const Record& rec = it->second[i];
+				if (qtype == 255 || rec.type == qtype) {
+					Record* stored = wildcard_records.add_copy_with_owner(rec, name);
+					if (stored == NULL) {
+						return false;
+					}
+					out.push_back(stored);
+				}
+			}
+		}
+		return true;
+	}
+
 	bool owner_exists(const std::string& name) const {
 		return records_.find(name) != records_.end();
+	}
+
+	bool wildcard_owner_exists(const std::string& name) const {
+		for (std::unordered_map<std::string, std::vector<Record> >::const_iterator it = records_.begin(); it != records_.end(); ++it) {
+			if (wildcard_owner_matches(it->first, name)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	static void build_header_and_question(const uint8_t* req, const Question& q, uint8_t rcode,
@@ -2134,11 +2315,24 @@ public:
 		}
 
 		std::vector<const Record*> answers;
+		WildcardRecordList wildcard_records;
+		const bool exact_owner = owner_exists(q.name);
+
 		collect_matching_records(q.name, q.qtype, answers);
+		if (answers.empty() && !exact_owner) {
+			if (!matching_wildcard_records(q.name, q.qtype, wildcard_records, answers)) {
+				return false;
+			}
+		}
 
 		if (answers.empty() && q.qtype != 5 && q.qtype != 255) {
 			std::vector<const Record*> cname_answers;
 			collect_matching_records(q.name, 5, cname_answers);
+			if (cname_answers.empty() && !exact_owner) {
+				if (!matching_wildcard_records(q.name, 5, wildcard_records, cname_answers)) {
+					return false;
+				}
+			}
 			for (size_t i = 0; i < cname_answers.size(); ++i) {
 				answers.push_back(cname_answers[i]);
 			}
@@ -2148,7 +2342,13 @@ public:
 					decode_dns_name(&cname_answers[i]->rdata[0], cname_answers[i]->rdata.size(), off);
 				if (!target.empty()) {
 					std::vector<const Record*> target_records;
-					collect_matching_records(normalize_dns_name_token(target), q.qtype, target_records);
+					std::string normalized_target = normalize_dns_name_token(target);
+					collect_matching_records(normalized_target, q.qtype, target_records);
+					if (target_records.empty() && !owner_exists(normalized_target)) {
+						if (!matching_wildcard_records(normalized_target, q.qtype, wildcard_records, target_records)) {
+							return false;
+						}
+					}
 					for (size_t j = 0; j < target_records.size(); ++j) {
 						answers.push_back(target_records[j]);
 					}
@@ -2160,7 +2360,7 @@ public:
 			return false;
 		}
 		if (answers.empty()) {
-			if (!owner_exists(q.name)) {
+			if (!exact_owner && !wildcard_owner_exists(q.name)) {
 				return false;
 			}
 			build_header_and_question(req, q, 0, 0, resp);
@@ -2396,9 +2596,7 @@ struct Job {
 
 	Job() : type(JOB_NONE), fd(-1), tls(false), peer(), peer_len(0), req_len(0), req_heap(NULL), req_inline() {}
 	~Job() {
-		if (req_heap) {
-			delete[] req_heap;
-		}
+		std::free(req_heap);
 	}
 	Job(const Job&) = delete;
 	Job& operator=(const Job&) = delete;
@@ -2411,7 +2609,8 @@ struct Job {
 	}
 	Job& operator=(Job&& other) noexcept {
 		if (this != &other) {
-			if (req_heap) { delete[] req_heap; req_heap = NULL; }
+			std::free(req_heap);
+			req_heap = NULL;
 			type = other.type;
 			fd = other.fd;
 			tls = other.tls;
@@ -2494,14 +2693,17 @@ public:
 		job.req_len = len;
 		job.fd = -1;
 		job.tls = false;
-		if (job.req_heap) {
-			delete[] job.req_heap;
-			job.req_heap = NULL;
-		}
+		std::free(job.req_heap);
+		job.req_heap = NULL;
 		if (len <= INLINE_REQ) {
 			std::memcpy(job.req_inline, data, len);
 		} else {
-			job.req_heap = new uint8_t[len];
+			job.req_heap = static_cast<uint8_t*>(std::malloc(len));
+			if (job.req_heap == NULL) {
+				job.type = Job::JOB_NONE;
+				job.req_len = 0;
+				return false;
+			}
 			std::memcpy(job.req_heap, data, len);
 		}
 		tail_ = (tail_ + 1) % queue_.size();
@@ -2520,10 +2722,8 @@ public:
 		job.fd = fd;
 		job.tls = tls;
 		job.req_len = 0;
-		if (job.req_heap) {
-			delete[] job.req_heap;
-			job.req_heap = NULL;
-		}
+		std::free(job.req_heap);
+		job.req_heap = NULL;
 		tail_ = (tail_ + 1) % queue_.size();
 		++size_;
 		cv_.notify_one();
@@ -3146,7 +3346,7 @@ class Proxy {
 	}
 
 public:
-	Proxy(int argc, char** argv)
+	Proxy(intS argc, char** argv)
 		: cfg_(RuntimeConfig::load(argc, argv)),
 		  cache_(cfg_.cache_stripes, cfg_.cache_ways, cfg_.cache_key_max, cfg_.cache_resp_max),
 		  local_records_(),
@@ -3209,7 +3409,7 @@ public:
 		std::vector<struct epoll_event> events(16);
 		while (g_running) {
 			reload_config_if_due();
-			intS n = epoll_wait(epoll_fd.get(), &events[0], static_cast<int>(events.size()), 500);
+			intS n = epoll_wait(epoll_fd.get(), &events[0], static_cast<intS>(events.size()), 500);
 			if (n < 0) {
 				if (errno == EINTR) {
 					continue;
