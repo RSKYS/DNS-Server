@@ -41,7 +41,7 @@ typedef short int intS;
 #define DNS_HOST "0.0.0.0"
 #endif
 
-static const char* const DNS_VERBOSE_ENV = "DNS_VERBOSE";
+static const char* const DNS_VERBOSE = "DNS_VERBOSE";
 static const char* const UPSTREAM_DNS = "1.1.1.1";
 static const uint32_t RELOAD_INTERVAL_SECONDS = 90;
 static const uint16_t DNS_PORT = 53;
@@ -54,7 +54,7 @@ static void on_signal(int) {
 	g_running = 0;
 }
 
-static void install_signal_handlers() {
+static void signal_handlers() {
 	struct sigaction sa;
 	std::memset(&sa, 0, sizeof(sa));	
 	sa.sa_handler = on_signal;
@@ -326,7 +326,7 @@ private:
 
 	static bool verbose_cached() {
 		static intS enabled = []() -> intS {
-			const char* v = std::getenv(DNS_VERBOSE_ENV);
+			const char* v = std::getenv(DNS_VERBOSE);
 			return (v != NULL && v[0] != '\0' && std::strcmp(v, "0") != 0) ? 1 : 0;
 		}();
 		return enabled != 0;
@@ -384,7 +384,7 @@ static bool set_nonblocking(int fd) {
 }
 
 static void set_cloexec(int fd) {
-	int flags = fcntl(fd, F_GETFD, 0);
+	intS flags = fcntl(fd, F_GETFD, 0);
 	if (flags >= 0) {
 		fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 	}
@@ -404,7 +404,7 @@ static bool connect_with_timeout(int fd, const struct sockaddr* addr, socklen_t 
 		return false;
 	}
 
-	int rc = connect(fd, addr, addrlen);
+	intS rc = connect(fd, addr, addrlen);
 	if (rc == 0) {
 		return fcntl(fd, F_SETFL, flags) == 0;
 	}
@@ -889,7 +889,7 @@ private:
 		return out;
 	}
 
-	static bool strip_parentheses_outside_quotes(const std::string& line, std::string& out, int& depth, std::string& error) {
+	static bool strip_parentheses_outside_quotes(const std::string& line, std::string& out, intS& depth, std::string& error) {
 		out.clear();
 		out.reserve(line.size());
 		bool in_quote = false;
@@ -1083,7 +1083,7 @@ private:
 			return false;
 		}
 		for (size_t i = 0; i < hex.size(); i += 2) {
-			int v = 0;
+			intS v = 0;
 			for (size_t j = 0; j < 2; ++j) {
 				char c = hex[i + j];
 				v <<= 4;
@@ -1097,7 +1097,7 @@ private:
 		return true;
 	}
 
-	static int base64_value(char c) {
+	static intS base64_value(char c) {
 		if (c >= 'A' && c <= 'Z') return c - 'A';
 		if (c >= 'a' && c <= 'z') return c - 'a' + 26;
 		if (c >= '0' && c <= '9') return c - '0' + 52;
@@ -1109,7 +1109,7 @@ private:
 	static bool parse_base64_data(const std::string& text, std::vector<uint8_t>& out) {
 		out.clear();
 		uint32_t buf = 0;
-		int bits = 0;
+		intS bits = 0;
 		bool padded = false;
 		for (size_t i = 0; i < text.size(); ++i) {
 			char c = text[i];
@@ -1123,7 +1123,7 @@ private:
 			if (padded) {
 				return false;
 			}
-			int v = base64_value(c);
+			intS v = base64_value(c);
 			if (v < 0) {
 				return false;
 			}
@@ -1216,19 +1216,19 @@ private:
 				return false;
 			}
 		}
-		int year = std::atoi(s.substr(0, 4).c_str());
-		int mon = std::atoi(s.substr(4, 2).c_str());
-		int day = std::atoi(s.substr(6, 2).c_str());
-		int hour = std::atoi(s.substr(8, 2).c_str());
-		int min = std::atoi(s.substr(10, 2).c_str());
-		int sec = std::atoi(s.substr(12, 2).c_str());
+		intS year = std::atoi(s.substr(0, 4).c_str());
+		intS mon = std::atoi(s.substr(4, 2).c_str());
+		intS day = std::atoi(s.substr(6, 2).c_str());
+		intS hour = std::atoi(s.substr(8, 2).c_str());
+		intS min = std::atoi(s.substr(10, 2).c_str());
+		intS sec = std::atoi(s.substr(12, 2).c_str());
 		if (mon < 1 || mon > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59) {
 			return false;
 		}
-		int y = year;
-		int m = mon;
+		intS y = year;
+		intS m = mon;
 		y -= m <= 2;
-		const int era = (y >= 0 ? y : y - 399) / 400;
+		const intS era = (y >= 0 ? y : y - 399) / 400;
 		const unsigned yoe = static_cast<unsigned>(y - era * 400);
 		const unsigned doy = (153U * static_cast<unsigned>(m + (m > 2 ? -3 : 9)) + 2U) / 5U + static_cast<unsigned>(day) - 1U;
 		const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
@@ -1252,7 +1252,7 @@ private:
 			++i;
 		}
 		int64_t frac = 0;
-		int digits = 0;
+		intS digits = 0;
 		if (i < s.size() && s[i] == '.') {
 			++i;
 			while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])) && digits < 3) {
@@ -1276,8 +1276,8 @@ private:
 		if (pos >= tokens.size()) {
 			return false;
 		}
-		int deg = -1;
-		int min = 0;
+		intS deg = -1;
+		intS min = 0;
 		int64_t sec_millis = 0;
 		std::string hemi;
 		if (!parse_int_text(tokens[pos++], deg)) {
@@ -1315,17 +1315,17 @@ private:
 		return true;
 	}
 
-	static bool parse_int_text(const std::string& s, int& out) {
+	static bool parse_int_text(const std::string& s, intS& out) {
 		if (s.empty()) {
 			return false;
 		}
 		char* end = NULL;
 		errno = 0;
 		long v = std::strtol(s.c_str(), &end, 10);
-		if (errno != 0 || end == s.c_str() || *end != '\0' || v < std::numeric_limits<int>::min() || v > std::numeric_limits<int>::max()) {
+		if (errno != 0 || end == s.c_str() || *end != '\0' || v < std::numeric_limits<intS>::min() || v > std::numeric_limits<intS>::max()) {
 			return false;
 		}
-		out = static_cast<int>(v);
+		out = static_cast<intS>(v);
 		return true;
 	}
 
@@ -1453,7 +1453,7 @@ private:
 			uint8_t bytes[16];
 			std::memset(bytes, 0, sizeof(bytes));
 			size_t maxbits = 0;
-			int family = 0;
+			intS family = 0;
 			if (afi == 1) {
 				family = AF_INET;
 				maxbits = 32;
@@ -2026,7 +2026,7 @@ public:
 		std::string line;
 		std::string logical;
 		bool logical_owner_omitted = false;
-		int paren_depth = 0;
+		intS paren_depth = 0;
 		size_t line_no = 0;
 		size_t logical_line_no = 0;
 		size_t bad = 0;
@@ -2218,7 +2218,7 @@ static bool ssl_write_all(SSL* ssl, const uint8_t* data, size_t len) {
 			off += static_cast<size_t>(n);
 			continue;
 		}
-		int err = SSL_get_error(ssl, n);
+		intS err = SSL_get_error(ssl, n);
 		if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE ||
 			(err == SSL_ERROR_SYSCALL && errno == EINTR)) {
 			continue;
@@ -2236,7 +2236,7 @@ static bool ssl_read_all(SSL* ssl, uint8_t* data, size_t len) {
 			off += static_cast<size_t>(n);
 			continue;
 		}
-		int err = SSL_get_error(ssl, n);
+		intS err = SSL_get_error(ssl, n);
 		if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE ||
 			(err == SSL_ERROR_SYSCALL && errno == EINTR)) {
 			continue;
@@ -3209,7 +3209,7 @@ public:
 		std::vector<struct epoll_event> events(16);
 		while (g_running) {
 			reload_config_if_due();
-			int n = epoll_wait(epoll_fd.get(), &events[0], static_cast<int>(events.size()), 500);
+			intS n = epoll_wait(epoll_fd.get(), &events[0], static_cast<int>(events.size()), 500);
 			if (n < 0) {
 				if (errno == EINTR) {
 					continue;
@@ -3265,7 +3265,7 @@ void WorkerPool::thread_main(Proxy* proxy) {
 }
 
 int main(int argc, char** argv) {
-	install_signal_handlers();
+	signal_handlers();
 
 	OPENSSL_init_ssl(0, NULL);
 
