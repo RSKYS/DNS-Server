@@ -1,12 +1,13 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <cerrno>
 #include <condition_variable>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <errno.h>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -14,28 +15,22 @@
 #include <memory>
 #include <mutex>
 #include <netinet/tcp.h>
-#include <new>
-#include <openssl/ec.h>
-#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
-#include <openssl/x509_vfy.h>
 #include <queue>
-#include <signal.h>
 #include <stdexcept>
 #include <string>
 #include <sys/epoll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
 #include <thread>
-#include <time.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
 typedef short int intS;
 
 #ifndef DNS_HOST
@@ -60,15 +55,15 @@ static void signal_handlers() {
 	std::memset(&sa, 0, sizeof(sa));	
 	sa.sa_handler = on_signal;
 	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
-	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, nullptr);
+	sigaction(SIGTERM, &sa, nullptr);
 	signal(SIGPIPE, SIG_IGN);
 }
 
 static uint32_t monotonic_seconds() {
 	struct timespec ts;
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return static_cast<uint32_t>(std::time(NULL));
+		return static_cast<uint32_t>(std::time(nullptr));
 	}
 	return static_cast<uint32_t>(ts.tv_sec);
 }
@@ -83,10 +78,10 @@ static int clamp_int(int value, int low, int high) {
 
 static bool parse_size_env(const char* name, size_t& out) {
 	const char* s = std::getenv(name);
-	if (s == NULL || *s == '\0') {
+	if (s == nullptr || *s == '\0') {
 		return false;
 	}
-	char* end = NULL;
+	char* end = nullptr;
 	errno = 0;
 	unsigned long long v = std::strtoull(s, &end, 10);
 	if (errno != 0 || end == s) {
@@ -175,9 +170,9 @@ struct RuntimeConfig {
 
 		cfg.config_path = "/etc/dns_server/config";
 		for (intS i = 1; i < argc; ++i) {
-			std::string arg = argv[i] == NULL ? std::string() : std::string(argv[i]);
+			std::string arg = argv[i] == nullptr ? std::string() : std::string(argv[i]);
 			if (arg == "-c" || arg == "--config") {
-				if (i + 1 >= argc || argv[i + 1] == NULL || argv[i + 1][0] == '\0') {
+				if (i + 1 >= argc || argv[i + 1] == nullptr || argv[i + 1][0] == '\0') {
 					throw std::runtime_error("missing config path after " + arg);
 				}
 				cfg.config_path = argv[++i];
@@ -255,8 +250,8 @@ struct RuntimeConfig {
 class UniqueFd {
 	int fd_;
 
-	UniqueFd(const UniqueFd&);
-	UniqueFd& operator=(const UniqueFd&);
+	UniqueFd(const UniqueFd&) = delete;
+	UniqueFd& operator=(const UniqueFd&) = delete;
 
 public:
 	UniqueFd() : fd_(-1) {}
@@ -328,7 +323,7 @@ private:
 	static bool verbose_cached() {
 		static intS enabled = []() -> intS {
 			const char* v = std::getenv(DNS_VERBOSE);
-			return (v != NULL && v[0] != '\0' && std::strcmp(v, "0") != 0) ? 1 : 0;
+			return (v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0) ? 1 : 0;
 		}();
 		return enabled != 0;
 	}
@@ -365,9 +360,9 @@ public:
 
 		std::lock_guard<std::mutex> lock(mtx_);
 		char timestamp[32];
-		std::time_t now = std::time(NULL);
+		std::time_t now = std::time(nullptr);
 		struct tm local_tm;
-		if (localtime_r(&now, &local_tm) == NULL) {
+		if (localtime_r(&now, &local_tm) == nullptr) {
 			std::strncpy(timestamp, "0000-00-00 00:00:00", sizeof(timestamp));
 			timestamp[sizeof(timestamp) - 1] = '\0';
 		} else {
@@ -421,7 +416,7 @@ static bool connect_with_timeout(int fd, const struct sockaddr* addr, socklen_t 
 	std::memset(&tv, 0, sizeof(tv));
 	tv.tv_sec = seconds;
 
-	rc = select(fd + 1, NULL, &wfds, NULL, &tv);
+	rc = select(fd + 1, nullptr, &wfds, nullptr, &tv);
 	if (rc <= 0) {
 		fcntl(fd, F_SETFL, flags);
 		if (rc == 0) {
@@ -491,7 +486,7 @@ static inline void put_be32(uint8_t* p, uint32_t value) {
 }
 
 static bool skip_dns_name(const uint8_t* msg, size_t len, size_t& off) {
-	if (msg == NULL) {
+	if (msg == nullptr) {
 		return false;
 	}
 	size_t pos = off;
@@ -611,7 +606,7 @@ static std::string dns_type_name(uint16_t type) {
 	return "TYPE-" + std::to_string(type);
 }
 static std::string parse_query_info(const uint8_t* msg, size_t len) {
-	if (msg == NULL || len < 12) {
+	if (msg == nullptr || len < 12) {
 		return "[Malformed Msg]";
 	}
 	uint16_t qd = be16(msg + 4);
@@ -630,7 +625,7 @@ static std::string parse_query_info(const uint8_t* msg, size_t len) {
 }
 
 static uint32_t extract_min_ttl(const uint8_t* msg, size_t len) {
-	if (msg == NULL || len < 12) {
+	if (msg == nullptr || len < 12) {
 		return 0;
 	}
 	uint16_t qd = be16(msg + 4);
@@ -668,7 +663,7 @@ static uint32_t extract_min_ttl(const uint8_t* msg, size_t len) {
 }
 
 static bool adjust_ttls(uint8_t* msg, size_t len, uint32_t age) {
-	if (msg == NULL || len < 12) {
+	if (msg == nullptr || len < 12) {
 		return false;
 	}
 	uint16_t qd = be16(msg + 4);
@@ -702,7 +697,7 @@ static bool adjust_ttls(uint8_t* msg, size_t len, uint32_t age) {
 }
 
 static bool build_servfail(const uint8_t* req, size_t rlen, std::vector<uint8_t>& resp) {
-	if (req == NULL || rlen < 12) {
+	if (req == nullptr || rlen < 12) {
 		return false;
 	}
 	resp.assign(req, req + rlen);
@@ -735,7 +730,7 @@ static bool parse_u16_token(const std::string& s, uint16_t& out) {
 	if (s.empty()) {
 		return false;
 	}
-	char* end = NULL;
+	char* end = nullptr;
 	errno = 0;
 	unsigned long v = std::strtoul(s.c_str(), &end, 10);
 	if (errno != 0 || end == s.c_str() || *end != '\0' || v > 65535UL) {
@@ -749,7 +744,7 @@ static bool parse_u32_token(const std::string& s, uint32_t& out) {
 	if (s.empty()) {
 		return false;
 	}
-	char* end = NULL;
+	char* end = nullptr;
 	errno = 0;
 	unsigned long v = std::strtoul(s.c_str(), &end, 10);
 	if (errno != 0 || end == s.c_str() || *end != '\0' || v > 0xffffffffUL) {
@@ -857,8 +852,8 @@ private:
 	bool active_;
 	mutable std::mutex mtx_;
 
-	LocalRecords(const LocalRecords&);
-	LocalRecords& operator=(const LocalRecords&);
+	LocalRecords(const LocalRecords&) = delete;
+	LocalRecords& operator=(const LocalRecords&) = delete;
 
 	static std::string strip_comment_outside_quotes(const std::string& line) {
 		std::string out;
@@ -1320,7 +1315,7 @@ private:
 		if (s.empty()) {
 			return false;
 		}
-		char* end = NULL;
+		char* end = nullptr;
 		errno = 0;
 		long v = std::strtol(s.c_str(), &end, 10);
 		if (errno != 0 || end == s.c_str() || *end != '\0' || v < std::numeric_limits<intS>::min() || v > std::numeric_limits<intS>::max()) {
@@ -1895,7 +1890,7 @@ private:
 		size_t count;
 		size_t capacity;
 
-		WildcardRecordList() : records(NULL), count(0), capacity(0) {}
+		WildcardRecordList() : records(nullptr), count(0), capacity(0) {}
 
 		~WildcardRecordList() {
 			clear();
@@ -1906,7 +1901,7 @@ private:
 				records[i].~Record();
 			}
 			std::free(records);
-			records = NULL;
+			records = nullptr;
 			count = 0;
 			capacity = 0;
 		}
@@ -1921,7 +1916,7 @@ private:
 			}
 
 			void* mem = std::malloc(sizeof(Record) * new_capacity);
-			if (mem == NULL) {
+			if (mem == nullptr) {
 				return false;
 			}
 			Record* new_records = static_cast<Record*>(mem);
@@ -1949,7 +1944,7 @@ private:
 
 		Record* add_copy_with_owner(const Record& rec, const std::string& owner) {
 			if (count == capacity && !grow()) {
-				return NULL;
+				return nullptr;
 			}
 			Record* slot = &records[count];
 			new (slot) Record(rec);
@@ -1965,7 +1960,7 @@ private:
 	};
 
 	static bool parse_question(const uint8_t* req, size_t rlen, Question& q) {
-		if (req == NULL || rlen < 16) {
+		if (req == nullptr || rlen < 16) {
 			return false;
 		}
 		uint16_t qd = be16(req + 4);
@@ -2124,7 +2119,7 @@ private:
 				const Record& rec = it->second[i];
 				if (qtype == 255 || rec.type == qtype) {
 					Record* stored = wildcard_records.add_copy_with_owner(rec, name);
-					if (stored == NULL) {
+					if (stored == nullptr) {
 						return false;
 					}
 					out.push_back(stored);
@@ -2471,8 +2466,8 @@ class DnsCache {
 	size_t key_max_;
 	size_t resp_max_;
 
-	DnsCache(const DnsCache&);
-	DnsCache& operator=(const DnsCache&);
+	DnsCache(const DnsCache&) = delete;
+	DnsCache& operator=(const DnsCache&) = delete;
 
 	static inline uint64_t fnv1a(const uint8_t* data, size_t len) {
 		uint64_t h = 14695981039346656037ULL;
@@ -2496,7 +2491,7 @@ public:
 	}
 
 	bool lookup(const uint8_t* req, size_t rlen, std::vector<uint8_t>& resp) {
-		if (req == NULL || rlen < 2) {
+		if (req == nullptr || rlen < 2) {
 			return false;
 		}
 		uint64_t h = fnv1a(req + 2, rlen - 2);
@@ -2534,7 +2529,7 @@ public:
 	}
 
 	void store(const uint8_t* req, size_t rlen, const uint8_t* resp_data, size_t resp_len) {
-		if (req == NULL || resp_data == NULL || rlen < 2 || rlen - 2 > key_max_ || resp_len > resp_max_) {
+		if (req == nullptr || resp_data == nullptr || rlen < 2 || rlen - 2 > key_max_ || resp_len > resp_max_) {
 			return;
 		}
 		if (resp_len < 12 || (resp_data[2] & 0x02) != 0) {
@@ -2594,7 +2589,7 @@ struct Job {
 	uint8_t* req_heap;
 	uint8_t req_inline[INLINE_REQ];
 
-	Job() : type(JOB_NONE), fd(-1), tls(false), peer(), peer_len(0), req_len(0), req_heap(NULL), req_inline() {}
+	Job() : type(JOB_NONE), fd(-1), tls(false), peer(), peer_len(0), req_len(0), req_heap(nullptr), req_inline() {}
 	~Job() {
 		std::free(req_heap);
 	}
@@ -2603,14 +2598,14 @@ struct Job {
 	Job(Job&& other) noexcept 
 		: type(other.type), fd(other.fd), tls(other.tls), peer(other.peer), peer_len(other.peer_len), req_len(other.req_len), req_heap(other.req_heap) {
 		std::memcpy(req_inline, other.req_inline, INLINE_REQ);
-		other.req_heap = NULL;
+		other.req_heap = nullptr;
 		other.fd = -1;
 		other.type = JOB_NONE;
 	}
 	Job& operator=(Job&& other) noexcept {
 		if (this != &other) {
 			std::free(req_heap);
-			req_heap = NULL;
+			req_heap = nullptr;
 			type = other.type;
 			fd = other.fd;
 			tls = other.tls;
@@ -2619,7 +2614,7 @@ struct Job {
 			req_len = other.req_len;
 			req_heap = other.req_heap;
 			std::memcpy(req_inline, other.req_inline, INLINE_REQ);
-			other.req_heap = NULL;
+			other.req_heap = nullptr;
 			other.fd = -1;
 			other.type = JOB_NONE;
 		}
@@ -2639,8 +2634,8 @@ class WorkerPool {
 	std::vector<std::thread> threads_;
 	bool stopping_;
 
-	WorkerPool(const WorkerPool&);
-	WorkerPool& operator=(const WorkerPool&);
+	WorkerPool(const WorkerPool&) = delete;
+	WorkerPool& operator=(const WorkerPool&) = delete;
 
 	void thread_main(Proxy* proxy);
 
@@ -2694,12 +2689,12 @@ public:
 		job.fd = -1;
 		job.tls = false;
 		std::free(job.req_heap);
-		job.req_heap = NULL;
+		job.req_heap = nullptr;
 		if (len <= INLINE_REQ) {
 			std::memcpy(job.req_inline, data, len);
 		} else {
 			job.req_heap = static_cast<uint8_t*>(std::malloc(len));
-			if (job.req_heap == NULL) {
+			if (job.req_heap == nullptr) {
 				job.type = Job::JOB_NONE;
 				job.req_len = 0;
 				return false;
@@ -2723,7 +2718,7 @@ public:
 		job.tls = tls;
 		job.req_len = 0;
 		std::free(job.req_heap);
-		job.req_heap = NULL;
+		job.req_heap = nullptr;
 		tail_ = (tail_ + 1) % queue_.size();
 		++size_;
 		cv_.notify_one();
@@ -2736,14 +2731,14 @@ public:
 	struct Connection {
 		int fd;
 		SSL* ssl;
-		Connection() : fd(-1), ssl(NULL) {}
+		Connection() : fd(-1), ssl(nullptr) {}
 	};
 
 	struct Handle {
 		size_t index;
 		Connection* conn;
-		Handle() : index(static_cast<size_t>(-1)), conn(NULL) {}
-		bool valid() const { return conn != NULL; }
+		Handle() : index(static_cast<size_t>(-1)), conn(nullptr) {}
+		bool valid() const { return conn != nullptr; }
 	};
 
 private:
@@ -2754,8 +2749,8 @@ private:
 	std::mutex mtx_;
 	std::condition_variable cv_;
 
-	UpstreamDoTPool(const UpstreamDoTPool&);
-	UpstreamDoTPool& operator=(const UpstreamDoTPool&);
+	UpstreamDoTPool(const UpstreamDoTPool&) = delete;
+	UpstreamDoTPool& operator=(const UpstreamDoTPool&) = delete;
 
 	bool open_connection(Connection& c) {
 		close_connection(c);
@@ -2783,14 +2778,14 @@ private:
 		}
 
 		c.ssl = SSL_new(ctx_.get());
-		if (c.ssl == NULL) {
+		if (c.ssl == nullptr) {
 			close_connection(c);
 			return false;
 		}
 		SSL_set_fd(c.ssl, c.fd);
 
 		X509_VERIFY_PARAM* param = SSL_get0_param(c.ssl);
-		if (param != NULL && X509_VERIFY_PARAM_set1_ip_asc(param, cfg_.upstream_dns.c_str()) != 1) {
+		if (param != nullptr && X509_VERIFY_PARAM_set1_ip_asc(param, cfg_.upstream_dns.c_str()) != 1) {
 			Logger::log(Logger::ERROR, "Could not configure upstream certificate IP verification.");
 			close_connection(c);
 			return false;
@@ -2814,13 +2809,13 @@ public:
 		if (!ctx_) {
 			throw std::runtime_error("failed to initialize upstream TLS context");
 		}
-		SSL_CTX_set_verify(ctx_.get(), SSL_VERIFY_PEER, NULL);
+		SSL_CTX_set_verify(ctx_.get(), SSL_VERIFY_PEER, nullptr);
 		if (SSL_CTX_set_default_verify_paths(ctx_.get()) <= 0) {
 			Logger::log(Logger::WARN, "Could not load default OS certificate CA paths.");
 		}
 		SSL_CTX_set_mode(ctx_.get(), SSL_MODE_AUTO_RETRY | SSL_MODE_RELEASE_BUFFERS);
 		X509_VERIFY_PARAM* param = SSL_CTX_get0_param(ctx_.get());
-		if (param != NULL) {
+		if (param != nullptr) {
 			X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 		}
 		for (size_t i = 0; i < conns_.size(); ++i) {
@@ -2835,10 +2830,10 @@ public:
 	}
 
 	static void close_connection(Connection& c) {
-		if (c.ssl != NULL) {
+		if (c.ssl != nullptr) {
 			SSL_shutdown(c.ssl);
 			SSL_free(c.ssl);
-			c.ssl = NULL;
+			c.ssl = nullptr;
 		}
 		if (c.fd >= 0) {
 			::close(c.fd);
@@ -2859,7 +2854,7 @@ public:
 		Handle h;
 		h.index = idx;
 		h.conn = &conns_[idx];
-		if (h.conn->fd < 0 || h.conn->ssl == NULL) {
+		if (h.conn->fd < 0 || h.conn->ssl == nullptr) {
 			open_connection(*h.conn);
 		}
 		return h;
@@ -2890,8 +2885,8 @@ class Proxy {
 	std::vector<uint8_t> udp_buffer_;
 	uint32_t next_config_reload_;
 
-	Proxy(const Proxy&);
-	Proxy& operator=(const Proxy&);
+	Proxy(const Proxy&) = delete;
+	Proxy& operator=(const Proxy&) = delete;
 
 	friend class WorkerPool;
 
@@ -2939,24 +2934,24 @@ class Proxy {
 	static SSL_CTX* create_server_ctx() {
 		SslPtr<SSL_CTX> ctx(SSL_CTX_new(TLS_server_method()));
 		if (!ctx) {
-			return NULL;
+			return nullptr;
 		}
 		SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION);
 		SSL_CTX_set_mode(ctx.get(), SSL_MODE_AUTO_RETRY | SSL_MODE_RELEASE_BUFFERS);
 
-		EVP_PKEY* raw_key = NULL;
-		SslPtr<EVP_PKEY_CTX> pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL));
+		EVP_PKEY* raw_key = nullptr;
+		SslPtr<EVP_PKEY_CTX> pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr));
 		if (pctx && EVP_PKEY_keygen_init(pctx.get()) > 0 &&
 			EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx.get(), NID_X9_62_prime256v1) > 0 &&
 			EVP_PKEY_keygen(pctx.get(), &raw_key) > 0) {
 		} else {
-			return NULL;
+			return nullptr;
 		}
 
 		SslPtr<EVP_PKEY> pkey(raw_key);
 		SslPtr<X509> cert(X509_new());
 		if (!cert) {
-			return NULL;
+			return nullptr;
 		}
 		ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 1);
 		X509_gmtime_adj(X509_get_notBefore(cert.get()), 0);
@@ -2965,17 +2960,17 @@ class Proxy {
 		X509_set_pubkey(cert.get(), pkey.get());
 
 		X509_NAME* name = X509_get_subject_name(cert.get());
-		if (name == NULL ||
+		if (name == nullptr ||
 			X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
 										reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0) != 1 ||
 			X509_set_issuer_name(cert.get(), name) != 1) {
-			return NULL;
+			return nullptr;
 		}
 		if (X509_sign(cert.get(), pkey.get(), EVP_sha256()) == 0 ||
 			SSL_CTX_use_certificate(ctx.get(), cert.get()) != 1 ||
 			SSL_CTX_use_PrivateKey(ctx.get(), pkey.get()) != 1 ||
 			SSL_CTX_check_private_key(ctx.get()) != 1) {
-			return NULL;
+			return nullptr;
 		}
 		return ctx.release();
 	}
@@ -3004,7 +2999,7 @@ class Proxy {
 		}
 
 		resp.resize(cfg_.udp_msg_max);
-		ssize_t n = recv(fd.get(), resp.empty() ? NULL : &resp[0], resp.size(), MSG_TRUNC);
+		ssize_t n = recv(fd.get(), resp.empty() ? nullptr : &resp[0], resp.size(), MSG_TRUNC);
 		if (n <= 0) {
 			return false;
 		}
@@ -3067,7 +3062,7 @@ class Proxy {
 			return forward_plain_dns(req, rlen, resp);
 		}
 		UpstreamDoTPool::Handle h = dot_pool_->acquire();
-		if (!h.valid() || h.conn == NULL || h.conn->fd < 0 || h.conn->ssl == NULL) {
+		if (!h.valid() || h.conn == nullptr || h.conn->fd < 0 || h.conn->ssl == nullptr) {
 			if (h.valid()) {
 				dot_pool_->release(h);
 			}
@@ -3108,7 +3103,7 @@ class Proxy {
 	}
 
 	bool process_query(const uint8_t* req, size_t rlen, std::vector<uint8_t>& resp, bool& cache_hit, bool& local_hit) {
-		if (req == NULL || rlen < 12 || rlen > WIRE_MAX) {
+		if (req == nullptr || rlen < 12 || rlen > WIRE_MAX) {
 			return false;
 		}
 
@@ -3188,7 +3183,7 @@ class Proxy {
 			struct sockaddr_in peer;
 			std::memset(&peer, 0, sizeof(peer));
 			socklen_t peer_len = sizeof(peer);
-			ssize_t n = recvfrom(udp_fd_.get(), buf.empty() ? NULL : &buf[0], buf.size(), MSG_DONTWAIT | MSG_TRUNC,
+			ssize_t n = recvfrom(udp_fd_.get(), buf.empty() ? nullptr : &buf[0], buf.size(), MSG_DONTWAIT | MSG_TRUNC,
 								 reinterpret_cast<struct sockaddr*>(&peer), &peer_len);
 			if (n < 0) {
 				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -3299,10 +3294,10 @@ class Proxy {
 			bool write_ok = false;
 			if (tls) {
 				write_ok = ssl_write_all(ssl.get(), lenbuf, sizeof(lenbuf)) &&
-						   ssl_write_all(ssl.get(), resp.empty() ? NULL : &resp[0], resp.size());
+						   ssl_write_all(ssl.get(), resp.empty() ? nullptr : &resp[0], resp.size());
 			} else {
 				write_ok = fd_write_all(client.get(), lenbuf, sizeof(lenbuf)) &&
-						   fd_write_all(client.get(), resp.empty() ? NULL : &resp[0], resp.size());
+						   fd_write_all(client.get(), resp.empty() ? nullptr : &resp[0], resp.size());
 			}
 			if (!write_ok) {
 				break;
@@ -3316,9 +3311,9 @@ class Proxy {
 	void accept_loop(int fd, bool tls) {
 		while (true) {
 #ifdef SOCK_CLOEXEC
-			int client = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+			int client = accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
 #else
-			int client = accept(fd, NULL, NULL);
+			int client = accept(fd, nullptr, nullptr);
 #endif
 			if (client < 0) {
 				if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -3451,7 +3446,7 @@ void WorkerPool::thread_main(Proxy* proxy) {
 		try {
 			if (job.type == Job::JOB_UDP) {
 				proxy->serve_udp_request(job.peer, job.peer_len,
-									 job.req_heap == NULL ? job.req_inline : job.req_heap,
+									 job.req_heap == nullptr ? job.req_inline : job.req_heap,
 									 job.req_len);
 			} else if (job.type == Job::JOB_TCP) {
 				proxy->serve_tcp_client(job.fd, job.tls);
@@ -3466,8 +3461,7 @@ void WorkerPool::thread_main(Proxy* proxy) {
 
 int main(int argc, char** argv) {
 	signal_handlers();
-
-	OPENSSL_init_ssl(0, NULL);
+	OPENSSL_init_ssl(0, nullptr);
 
 	try {
 		Proxy proxy(argc, argv);
@@ -3476,5 +3470,6 @@ int main(int argc, char** argv) {
 		std::cerr << "Fatal initialization error: " << e.what() << std::endl;
 		return 1;
 	}
+
 	return 0;
 }
